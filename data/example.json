@@ -14,5 +14,7 @@
   "product_price": "¥2,580",
   "product_growth": "+23.6%",
 
-  "product_image": "assets/product.png"
+  "product_image": "assets/product.png",
+  "product": "assets/product.png",
+  "logo": "assets/logo.jpg"
 }

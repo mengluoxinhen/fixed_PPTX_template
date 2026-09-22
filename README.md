@@ -33,7 +33,9 @@ PPTX 模板 + JSON 数据 + 图片
 - **多页 PPT 模板**：模板包含多少页即可渲染多少页
 - **内联文本占位符**：如 `Total reported sales: {{text:sales}} year to date.`
 - **跨 Run 文本占位符**：PowerPoint 将占位符拆分到多个 Run 时仍能正确替换
+- **重复占位符**：同一 `(type, key)` 组合可在多个 Shape、多页 Slide 乃至同一段落中重复出现，每一处都按各自位置从同一个数据值渲染（绑定标识是 `(type, key)` 而非单独的 key）
 - **模板校验**：非法占位符（如 `{{title}}`、`{{file:x}}`、`{{image}}`）会抛出 `MalformedPlaceholderError`
+- **UUID 工作目录模式**：通过 `workspace_loader` 适配层从 `<uuid4>/` 任务目录自动加载 `content.json` 与按文件名 stem 解析的图片资源（见第 12 节）
 - **自动化验证**：`verify.py` 对工作流和占位符语义进行自动检查
 
 MVP 目前**只支持两种占位符类型**：
@@ -83,16 +85,25 @@ ppt-template-renderer/
 ├── data/
 │   └── example.json
 ├── assets/
-│   └── product.png
+│   ├── product.png
+│   └── logo.jpg
+├── workspace/
+│   └── <uuid4>/
+│       ├── content.json
+│       ├── product.png
+│       └── logo.jpg
 ├── output/
-│   └── sales_report.pptx
+│   ├── direct_mode.pptx
+│   └── workspace_mode.pptx
 ├── src/
 │   ├── __init__.py
 │   ├── template_parser.py
 │   ├── text_renderer.py
 │   ├── image_renderer.py
+│   ├── workspace_loader.py
 │   └── renderer.py
 ├── build_test_template.py
+├── build_test_workspace.py
 ├── main.py
 ├── verify.py
 ├── requirements.txt
@@ -103,16 +114,19 @@ ppt-template-renderer/
 
 | 文件 | 职责 |
 |---|---|
-| `templates/sales_report_template.pptx` | 自动生成的 3 页测试模板（封面 / 指标卡片 / 产品展示） |
-| `data/example.json` | 测试数据，仅纯 key-value，无类型信息 |
-| `assets/product.png` | Pillow 自动生成的测试产品图 |
+| `templates/sales_report_template.pptx` | 自动生成的 4 页测试模板（封面 / 指标卡片 / 产品展示 / 工作目录资源测试） |
+| `data/example.json` | 直接数据模式的测试数据，仅纯 key-value，无类型信息 |
+| `assets/product.png`、`assets/logo.jpg` | Pillow 自动生成的测试图片 |
+| `workspace/<uuid4>/` | 测试用 UUID 工作目录（见第 12 节） |
 | `src/template_parser.py` | 扫描 Slide，识别 `{{text:}}` / `{{image:}}` 占位符，报告非法占位符 |
 | `src/text_renderer.py` | Run 级文本替换，保留原有样式 |
 | `src/image_renderer.py` | 图片区域替换 + Cover Crop 裁剪 |
+| `src/workspace_loader.py` | UUID 工作目录加载层：校验、读 content.json、按文件名 stem 发现图片；文本与图片两个命名空间严格分离，并提供 `render_workspace()` 组合入口 |
 | `src/renderer.py` | 通用渲染入口 `render(template_path, data, output_path)` |
 | `build_test_template.py` | 生成测试模板与测试图片（无需手工做 PPT） |
-| `main.py` | 命令行入口 |
-| `verify.py` | 自动化验证（端到端工作流 + 占位符语义测试） |
+| `build_test_workspace.py` | 生成测试用 UUID 工作目录（含 content.json 与图片副本） |
+| `main.py` | 命令行入口，支持 `--data`（直接模式）与 `--workspace`（工作目录模式） |
+| `verify.py` | 自动化验证（端到端工作流 + 占位符语义 + 重复占位符 + 工作目录） |
 
 ## 5. 使用方法
 
@@ -124,21 +138,37 @@ pip install -r requirements.txt
 
 安装 `python-pptx` 和 `Pillow`。
 
-### 生成测试模板
+### 生成测试模板与图片
 
 ```bash
 python build_test_template.py
 ```
 
-用 Python 自动生成 `templates/sales_report_template.pptx`（3 页、含新语法占位符）和 `assets/product.png`，无需手工制作 PPT。
+用 Python 自动生成 `templates/sales_report_template.pptx`（4 页、含类型化占位符与重复占位符）、`assets/product.png` 和 `assets/logo.jpg`，无需手工制作 PPT。
 
-### 渲染 PPT
+### 生成测试工作目录
 
 ```bash
-python main.py --template templates/sales_report_template.pptx --data data/example.json --output output/sales_report.pptx
+python build_test_workspace.py
+```
+
+创建 `workspace/550e8400-e29b-41d4-a716-446655440000/`（合法 UUID4 目录名），内含 `content.json`（仅 title、sales 两个文本值）与图片 `product.png`、`logo.jpg`，用于工作目录模式测试。
+
+### 渲染 PPT — 直接数据模式
+
+```bash
+python main.py --template templates/sales_report_template.pptx --data data/example.json --output output/direct_mode.pptx
 ```
 
 读取模板 + JSON 数据，执行图片替换和文本替换，输出到 `--output` 指定的路径，并打印实际替换的 text/image key 列表。
+
+### 渲染 PPT — UUID 工作目录模式
+
+```bash
+python main.py --template templates/sales_report_template.pptx --workspace workspace/550e8400-e29b-41d4-a716-446655440000 --output output/workspace_mode.pptx
+```
+
+自动加载 `content.json` 并按文件名 stem 发现图片资源，再交给同一个渲染核心。详见第 12 节。
 
 ### 运行验证
 
@@ -146,7 +176,7 @@ python main.py --template templates/sales_report_template.pptx --data data/examp
 python verify.py
 ```
 
-自动执行两类检查：端到端工作流检查（文件存在、3 页齐全、值已渲染、无残留占位符、图片已插入、尺寸未变、zip 合法）和占位符语义检查（详见第 8 节）。全部通过时输出 `ALL CHECKS PASSED`，否则以非零退出码失败。
+自动执行四组检查：端到端工作流（直接模式）、占位符语义、重复占位符语义、UUID 工作目录语义。全部通过时输出 `ALL CHECKS PASSED`，否则以非零退出码失败。
 
 ## 6. Renderer 接口
 
@@ -191,14 +221,18 @@ Renderer 将**整个文本内容恰好为** `{{image:key}}` 的 Shape 识别为�
 
 ```text
 python build_test_template.py          # OK
-python main.py ...                     # OK
+python build_test_workspace.py         # OK
+python main.py ... --data ... --output output/direct_mode.pptx       # OK
+python main.py ... --workspace ... --output output/workspace_mode.pptx  # OK
 python verify.py                       # ALL CHECKS PASSED
 ```
 
-`verify.py` 的两部分检查**全部通过**：
+`verify.py` 的四组检查**全部通过**（共 75 项）：
 
-- **端到端工作流**：模板与输出存在、PPTX 可解析、3 页齐全、所有期望值已渲染、无残留 `{{...}}`、图片已插入且在原区域内、页面尺寸未变、zip 结构合法、图片已嵌入包内。
-- **占位符语义**：`{{text:key}}` 渲染为文本；`{{image:key}}` 渲染为图片；`.png` 值经 `{{text:key}}` 仍按纯文本渲染且不生成图片；`{{title}}`、`{{file:x}}`、`{{image}}` 等非法占位符被拒绝；Cover Crop 数值验证通过（居中对称裁剪）；单 Run、内联、跨 Run 场景的文本样式保持均通过。
+- **端到端工作流（直接模式）**：模板与输出存在、PPTX 可解析、4 页齐全、所有期望值已渲染、除刻意缺失的 `{{image:missing_image}}` 外无残留占位符、5 个图片区域全部插入且各自裁剪独立、页面尺寸未变、zip 结构合法、png/jpg 均已嵌入。
+- **占位符语义**：`{{text:key}}` 渲染为文本；`{{image:key}}` 渲染为图片；`.png` 值经 `{{text:key}}` 仍按纯文本渲染；非法占位符被拒绝；Cover Crop 数值验证通过；单 Run、内联、跨 Run 的样式保持通过。
+- **重复占位符语义**：同 key 跨页、跨 Shape、同段落重复全部渲染；同一 key 的 text 与 image 绑定互不干扰；解析器按出现次数逐项暴露。
+- **UUID 工作目录语义**：合法 UUID4 校验、非法名称拒绝（`test`/`123`/`abc`/UUIDv1）、content.json 加载、`.png/.jpg/.jpeg` 按 stem 解析（`.webp` 等不支持格式被忽略）、stem 冲突按优先级确定性解析、缺失资源占位符原样保留、路径限定在工作目录内、显式清理函数可用且拒绝非 UUID4 目录。
 
 ## 9. 当前限制
 
@@ -243,3 +277,67 @@ render(template_path, data, output_path)
 5. **Renderer 不根据数据内容猜测类型**——扩展名不作为判断依据。
 6. **第一版只支持 `text` 和 `image` 两种类型**。
 7. **不在 Renderer 中加入业务领域逻辑**——销售报告只是测试数据。
+
+## 12. UUID 工作目录模式（workspace 模式）
+
+在原有一个 Python 渲染入口的基础上，增加了一层**数据/资源加载适配器** `src/workspace_loader.py`。它不改变渲染核心，只把 UUID 工作目录转换为渲染器可直接使用的数据。
+
+### 目录结构
+
+```text
+workspace/
+└── <uuid4>/
+    ├── content.json
+    ├── product.png
+    └── logo.jpg
+```
+
+### 约定（资源命名空间严格分离）
+
+* 一个 UUID4 文件夹代表一次 PPT 生成任务；目录名必须是合法的 UUID4，否则加载时抛出 `WorkspaceError`（如 `test/`、`123/`、UUIDv1 均被拒绝）。
+* 绑定标识是 `(type, key)`，两个命名空间互不越界：
+
+```text
+content.json                 →  {{text:key}}    （文本命名空间）
+<文件名stem>.<扩展名>          →  {{image:key}}   （图片命名空间）
+```
+
+* `content.json` 只存储文字/数据值，**不包含类型元数据**，也不参与图片解析；图片文件的存在与否也不影响文本查找。
+* 同一个 key 可以**安全地同时**存在于两个命名空间并各自独立生效：
+
+```text
+content.json: {"logo": "XX科技有限公司"}    +    工作目录内有 logo.jpg
+
+{{text:logo}}   →  "XX科技有限公司"      （不会被图片遮蔽）
+{{image:logo}}  →  workspace/logo.jpg   （不会被文本值阻断）
+```
+
+* `load_workspace()` 返回渲染器就绪的普通 dict：`{"path": ..., "data": {文本值}, "image_paths": {stem: 工作目录内的绝对路径}}`，两者严格分开；缺失的资源直接缺席于返回的 dict。
+* 图片使用固定文件名 stem（不含扩展名）。当前支持的图片格式：**PNG、JPG、JPEG**，即 `product.png` / `product.jpg` / `product.jpeg` 均可被 `{{image:product}}` 命中；同名多扩展时按 `SUPPORTED_IMAGE_EXTS`（`.png` → `.jpg` → `.jpeg`）顺序确定性优先解析，该列表集中定义在 `src/workspace_loader.py`。
+* **`.webp` 等不支持的图片格式被完全忽略**：不参与资源发现，也不会导致渲染失败；若工作目录内只有 `product.webp`，则 `{{image:product}}` 与其它缺失资源一样原样保留。
+* 扩展名**不是**占位符 key 的一部分：写 `{{image:product}}`，而不是 `{{image:product.png}}`；也不根据 key 或值猜测图片类型。
+* 渲染核心 4 个文件（`renderer.py` / `template_parser.py` / `text_renderer.py` / `image_renderer.py`）未被修改；`render_workspace()` 适配器按声明类型把 `image_paths` 喂给 `render_images`、把 `data` 喂给 `render_text`，因此同一 key 的双命名空间值不会互相污染。
+* 缺失资源时渲染不会失败：没有对应文本 key 的 `{{text:key}}`、没有对应图片文件的 `{{image:key}}` 都原样保留（这是当前 MVP 的有意行为）。
+* 安全约束：资源发现只扫描工作目录的直接子文件，所有返回路径被强制校验位于工作目录内部，占位符 key 的字符集也不允许出现路径分隔符，杜绝 `../secret` 式穿越。
+* 生命周期：创建 UUID 工作目录 → 放入/生成资源 → 渲染 PPTX → 调用 `cleanup_workspace()` 清理；当前原型**不会自动执行破坏性清理**，清理函数需显式调用，且拒绝删除目录名不是 UUID4 的路径。未来的 FastAPI 服务可以在生成成功或失败后用 `try/finally` 调用它。
+
+### 用法
+
+```bash
+# 方式一：直接 JSON 数据（原有模式，保持不变）
+python main.py --template templates/sales_report_template.pptx --data data/example.json --output output/direct_mode.pptx
+
+# 方式二：UUID 工作目录（自动加载 content.json + 按 stem 解析图片）
+python main.py --template templates/sales_report_template.pptx --workspace workspace/<uuid4> --output output/workspace_mode.pptx
+```
+
+概念上的调用链（渲染核心及其接口 `render(template_path, data, output_path)` 保持不变，直接模式继续使用它）：
+
+```python
+from src.workspace_loader import load_workspace, render_workspace
+
+workspace = load_workspace("workspace/<uuid4>")
+# workspace["data"]         仅文本值（content.json）
+# workspace["image_paths"]  仅图片路径（stem -> 工作目录内绝对路径）
+render_workspace(template_path, workspace, output_path)
+```

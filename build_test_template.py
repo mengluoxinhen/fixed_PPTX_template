@@ -5,8 +5,10 @@ Run once before rendering:
     python build_test_template.py
 
 Creates:
-    templates/sales_report_template.pptx  (3 slides, {{var}} placeholders)
+    templates/sales_report_template.pptx  (4 slides, typed {{text:/{{image:}}
+                                            placeholders incl. repeats)
     assets/product.png                    (Pillow-generated mockup)
+    assets/logo.jpg                       (Pillow-generated .jpg asset)
 """
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from pptx.util import Inches, Pt
 ROOT = Path(__file__).resolve().parent
 TEMPLATE_PATH = ROOT / "templates" / "sales_report_template.pptx"
 IMAGE_PATH = ROOT / "assets" / "product.png"
+LOGO_PATH = ROOT / "assets" / "logo.jpg"
 
 NAVY = RGBColor(0x1F, 0x3A, 0x5F)
 ORANGE = RGBColor(0xF2, 0x99, 0x38)
@@ -62,6 +65,22 @@ def add_rect(slide, shape_type, left, top, width, height, fill, line=None):
     return shp
 
 
+def add_image_region(slide, left, top, width, height, key, font_size=12):
+    """A gray box whose whole text is one {{image:key}} = the image region."""
+    ph = add_rect(slide, MSO_SHAPE.RECTANGLE, left, top, width, height,
+                  RGBColor(0xE3, 0xE8, 0xEF), line=RGBColor(0xB8, 0xC2, 0xD1))
+    tf = ph.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    run = p.add_run()
+    run.text = f"{{{{image:{key}}}}}"
+    run.font.size = Pt(font_size)
+    run.font.color.rgb = GRAY
+    run.font.name = "Calibri"
+    return ph
+
+
 def build_cover(slide):
     slide.background.fill.solid()
     slide.background.fill.fore_color.rgb = NAVY
@@ -80,6 +99,31 @@ def build_cover(slide):
     add_text(slide, 0.9, 6.6, 11.5, 0.5, [
         ("{{text:company_name}}", 13, False, RGBColor(0x9A, 0xAC, 0xC6)),
     ])
+    # Second occurrence of {{image:product_image}} (square region, slide 1)
+    add_image_region(slide, 10.9, 4.95, 1.6, 1.6, "product_image", font_size=9)
+
+
+def build_workspace_assets(slide):
+    """Slide 4: stem-keyed image regions for workspace mode.
+
+    product/logo assets resolve from a UUID workspace (or example.json in
+    direct mode); missing_image has no asset anywhere and must stay
+    unchanged after rendering.
+    """
+    slide.background.fill.solid()
+    slide.background.fill.fore_color.rgb = WHITE
+
+    add_text(slide, 0.9, 0.55, 11.5, 0.8, [
+        ("Workspace Asset Test", 28, True, NAVY),
+    ])
+    add_rect(slide, MSO_SHAPE.RECTANGLE, 0.95, 1.25, 1.2, 0.05, ORANGE)
+
+    add_image_region(slide, 0.9, 1.9, 2.6, 2.6, "product", font_size=11)
+    add_image_region(slide, 3.9, 1.9, 3.6, 1.2, "logo", font_size=11)
+    # Repeat of the same image key with a different (tall) region shape
+    add_image_region(slide, 7.9, 1.9, 1.2, 3.4, "product", font_size=9)
+    # No asset exists for this key: placeholder must survive rendering
+    add_image_region(slide, 9.6, 1.9, 2.2, 2.2, "missing_image", font_size=11)
 
 
 def build_metrics(slide):
@@ -90,6 +134,11 @@ def build_metrics(slide):
         ("Key Business Metrics", 28, True, NAVY),
     ])
     add_rect(slide, MSO_SHAPE.RECTANGLE, 0.95, 1.25, 1.2, 0.05, ORANGE)
+
+    # Repeated text occurrence across slides: {{text:title}} again (slide 2)
+    add_text(slide, 0.9, 1.45, 11.5, 0.45, [
+        ("Report: {{text:title}}", 13, False, GRAY),
+    ])
 
     cards = [
         ("Sales", "{{text:sales}}", CARD_BLUE),
@@ -141,17 +190,12 @@ def build_product(slide):
     ])
 
     # Right image region (placeholder replaced by the renderer)
-    ph = add_rect(slide, MSO_SHAPE.RECTANGLE, 7.1, 1.9, 5.3, 4.6,
-                  RGBColor(0xE3, 0xE8, 0xEF), line=RGBColor(0xB8, 0xC2, 0xD1))
-    tf = ph.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.alignment = PP_ALIGN.CENTER
-    run = p.add_run()
-    run.text = "{{image:product_image}}"
-    run.font.size = Pt(14)
-    run.font.color.rgb = GRAY
-    run.font.name = "Calibri"
+    add_image_region(slide, 7.1, 1.9, 5.3, 4.6, "product_image", font_size=14)
+
+    # Repeated text occurrence across slides: {{text:title}} again (slide 3)
+    add_text(slide, 0.9, 6.95, 11.5, 0.4, [
+        ("{{text:title}}", 11, False, GRAY),
+    ])
 
 
 def build_template():
@@ -160,7 +204,7 @@ def build_template():
     prs.slide_height = Inches(7.5)
     blank = prs.slide_layouts[6]
 
-    for builder in (build_cover, build_metrics, build_product):
+    for builder in (build_cover, build_metrics, build_product, build_workspace_assets):
         builder(prs.slides.add_slide(blank))
 
     TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +258,20 @@ def build_product_image():
     print(f"Image written: {IMAGE_PATH}")
 
 
+def build_logo_image():
+    """Small .jpg asset to prove stem resolution is extension-independent."""
+    img = Image.new("RGB", (800, 600), (0x1F, 0x3A, 0x5F))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((250, 130, 550, 430), outline=(0xF2, 0x99, 0x38), width=28)
+    draw.rectangle((360, 240, 440, 320), fill=(0xF2, 0x99, 0x38))
+    draw.text((400, 500), "EXAMPLE LOGO", font=load_font(48),
+              fill=(0xFF, 0xFF, 0xFF), anchor="mm")
+    LOGO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    img.save(LOGO_PATH)
+    print(f"Image written: {LOGO_PATH}")
+
+
 if __name__ == "__main__":
     build_template()
     build_product_image()
+    build_logo_image()
