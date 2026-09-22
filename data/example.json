@@ -1,0 +1,18 @@
+{
+  "title": "September 2026 Sales Report",
+  "subtitle": "East China Regional Performance",
+  "report_date": "September 2026",
+  "company_name": "Example Technology Co., Ltd.",
+
+  "sales": "¥12,580,000",
+  "growth": "+18.5%",
+  "orders": "12,580",
+  "customers": "3,280",
+
+  "product_name": "Smart Office Terminal X1",
+  "product_description": "A next-generation smart terminal designed for enterprise office scenarios.",
+  "product_price": "¥2,580",
+  "product_growth": "+23.6%",
+
+  "product_image": "assets/product.png"
+}
