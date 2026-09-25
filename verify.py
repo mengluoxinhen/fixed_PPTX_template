@@ -3,8 +3,8 @@
     python verify.py
 
 Part 1 — end-to-end workflow (direct --data mode): template/output existence,
-4 slides, values rendered, only the missing asset's placeholder survives,
-5 images inserted, unchanged slide size, zip validity.
+4 slides, values rendered (incl. table cells), only the missing asset's
+placeholder survives, 5 images inserted with contain-fit, zip validity.
 
 Part 2 — placeholder semantics tests (in-memory templates):
   1. {{text:key}} renders text
@@ -12,14 +12,20 @@ Part 2 — placeholder semantics tests (in-memory templates):
   3. a .png value via {{text:key}} stays plain text (no type inference)
   4. malformed/unknown placeholder types are rejected
   5. no leftover placeholders except intentionally missing assets
-  6. cover-crop behavior preserved
+  6. contain-fit behavior (aspect preserved, nothing cropped, centered)
   7. text run styling preserved (single-run, inline, and split-across-runs)
 
 Part 3 — repeated placeholders: same (type, key) across slides/shapes/
-paragraphs; per-occurrence regions and crops.
+paragraphs; per-occurrence regions and contain fits.
 
-Part 4 — UUID workspace: validation, content.json loading, stem-based image
-resolution (.png/.jpg/.jpeg/.webp), missing-asset survival, path safety,
+Part 4 — table cells: {{text:key}} inside table cells (shapes and cells,
+multiple keys per cell); missing keys and {{image:}} in cells stay unchanged.
+
+Part 5 — z-order: a replaced picture keeps the placeholder's original
+stacking position (bottom-layer placeholders stay bottom-layer).
+
+Part 6 — UUID workspace: validation, content.json loading, stem-based image
+resolution (.png/.jpg/.jpeg), missing-asset survival, path safety,
 explicit cleanup, and the workspace-mode output file.
 """
 import re
@@ -30,7 +36,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
 from pptx.util import Inches, Pt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,6 +67,7 @@ EXPECTED_TEXT = [
     "+23.6%",
     "Key Business Metrics",
     "Total reported sales: ¥12,580,000 year to date.",
+    "Growth +18.5% YoY",  # inline pair inside a TABLE CELL
 ]
 
 ANY_TOKEN = re.compile(r"\{\{.*?\}\}", re.DOTALL)
@@ -76,12 +83,18 @@ def check(name, ok, detail=""):
 
 
 def all_text(prs):
-    return "\n".join(
-        shape.text_frame.text
-        for slide in prs.slides
-        for shape in slide.shapes
-        if shape.has_text_frame
-    )
+    parts = []
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                parts.append(shape.text_frame.text)
+            if getattr(shape, "has_table", False):
+                parts.extend(
+                    cell.text_frame.text
+                    for row in shape.table.rows
+                    for cell in row.cells
+                )
+    return "\n".join(parts)
 
 
 def count_pictures(prs):
@@ -148,11 +161,32 @@ def render_template(prs, data):
         return Presentation(str(out))
 
 
-def find_picture(pictures, l, t, w, h):
-    """Return the picture whose bounds equal the given region (inches), or None."""
-    want = (Inches(l), Inches(t), Inches(w), Inches(h))
+def find_picture_centered(pictures, l, t, w, h):
+    """Return the picture centered on the given region (inches), or None.
+
+    With contain fit the picture no longer spans the whole region, but its
+    center always coincides with the region center.
+    """
+    cx = Inches(l) + Inches(w) / 2
+    cy = Inches(t) + Inches(h) / 2
     return next((p for p in pictures
-                 if (p.left, p.top, p.width, p.height) == want), None)
+                 if abs(p.left + p.width / 2 - cx) <= 2000
+                 and abs(p.top + p.height / 2 - cy) <= 2000), None)
+
+
+def is_contain_fit(pic, l, t, w, h, img_w, img_h):
+    """Assert pic is the contain-fit of an img_w x img_h image inside the
+    region (inches): aspect preserved, fully inside, centered, zero crop."""
+    region_w, region_h = Inches(w), Inches(h)
+    scale = min(region_w / img_w, region_h / img_h)
+    pw, ph = int(img_w * scale), int(img_h * scale)
+    pl = Inches(l) + (region_w - pw) // 2
+    pt = Inches(t) + (region_h - ph) // 2
+    tol = 2000  # EMU
+    return (abs(pic.left - pl) <= tol and abs(pic.top - pt) <= tol
+            and abs(pic.width - pw) <= tol and abs(pic.height - ph) <= tol
+            and pic.crop_left == pic.crop_right == 0.0
+            and pic.crop_top == pic.crop_bottom == 0.0)
 
 
 def workflow_checks():
@@ -189,32 +223,30 @@ def workflow_checks():
     check("R3/R7: all 5 image occurrences inserted", len(pictures) == 5,
           f"{len(pictures)} picture(s)")
     if len(pictures) == 5:
-        check("R3: slide-1 square image region honored exactly",
-              find_picture(pictures, 10.9, 4.95, 1.6, 1.6) is not None)
-        check("R3: slide-3 landscape image region honored exactly",
-              find_picture(pictures, 7.1, 1.9, 5.3, 4.6) is not None)
-        sq = find_picture(pictures, 0.9, 1.9, 2.6, 2.6)
-        tall = find_picture(pictures, 7.9, 1.9, 1.2, 3.4)
-        logo = find_picture(pictures, 3.9, 1.9, 3.6, 1.2)
+        cover_pic = find_picture_centered(pictures, 10.9, 4.95, 1.6, 1.6)
+        product_pic = find_picture_centered(pictures, 7.1, 1.9, 5.3, 4.6)
+        check("R3: slide-1 and slide-3 occurrences each anchored to their region",
+              cover_pic is not None and product_pic is not None)
+        sq = find_picture_centered(pictures, 0.9, 1.9, 2.6, 2.6)
+        tall = find_picture_centered(pictures, 7.9, 1.9, 1.2, 3.4)
+        logo = find_picture_centered(pictures, 3.9, 1.9, 3.6, 1.2)
         check("W: slide-4 stem-key regions filled (product x2 + logo)",
               sq is not None and tall is not None and logo is not None)
-        cover_pic = find_picture(pictures, 10.9, 4.95, 1.6, 1.6)
-        product_pic = find_picture(pictures, 7.1, 1.9, 5.3, 4.6)
         if cover_pic and product_pic:
-            # 1200x1040 image: square 1.6x1.6 region -> side crop (≈0.0667);
-            # 5.3x4.6 region -> tiny side crop (≈0.0007). Per-occurrence.
-            check("R3: same key, per-occurrence independent crops",
-                  cover_pic.crop_left > 0.05 and cover_pic.crop_top == 0
-                  and 0 < product_pic.crop_left < 0.01,
-                  f"cover crop_left={cover_pic.crop_left:.4f}, "
-                  f"product crop_left={product_pic.crop_left:.4f}")
+            # contain fit: uniform scale, aspect preserved, whole image kept,
+            # centered in each occurrence's own region, nothing cropped.
+            check("R3: same key, per-occurrence independent contain fits",
+                  is_contain_fit(cover_pic, 10.9, 4.95, 1.6, 1.6, 1200, 1040)
+                  and is_contain_fit(product_pic, 7.1, 1.9, 5.3, 4.6, 1200, 1040)
+                  and (cover_pic.width, cover_pic.height)
+                  != (product_pic.width, product_pic.height),
+                  f"cover {cover_pic.width}x{cover_pic.height} EMU, "
+                  f"product {product_pic.width}x{product_pic.height} EMU")
         if sq and tall and logo:
-            check("T16: crop direction per occurrence on slide 4",
-                  sq.crop_left > 0 and sq.crop_top == 0
-                  and tall.crop_left > sq.crop_left
-                  and logo.crop_top > 0 and logo.crop_left == 0,
-                  f"square={sq.crop_left:.4f} tall={tall.crop_left:.4f} "
-                  f"logo crop_top={logo.crop_top:.4f}")
+            check("T16: contain fit computed per occurrence on slide 4",
+                  is_contain_fit(sq, 0.9, 1.9, 2.6, 2.6, 1200, 1040)
+                  and is_contain_fit(tall, 7.9, 1.9, 1.2, 3.4, 1200, 1040)
+                  and is_contain_fit(logo, 3.9, 1.9, 3.6, 1.2, 800, 600))
 
     check("slide size unchanged",
           (tpl.slide_width, tpl.slide_height) == (prs.slide_width, prs.slide_height),
@@ -249,20 +281,12 @@ def semantic_checks():
     check("check 2: {{image:key}} inserts a picture", len(pics) == 1)
     if pics:
         pic = pics[0]
-        region_ok = (pic.left, pic.top, pic.width, pic.height) == (
-            Inches(2), Inches(2), Inches(2), Inches(2)
-        )
-        check("image occupies the exact placeholder region", region_ok)
-        # 6. cover-crop: 1200x1040 image into a 1:1 square region is wider
-        # than the region -> centered left/right crop, no vertical crop.
-        crop_x = 1.0 - 1.0 / (1200 / 1040)
-        expected_side = crop_x / 2
-        approx = abs(pic.crop_left - expected_side) < 1e-4
-        symmetric = (abs(pic.crop_left - pic.crop_right) < 1e-9
-                     and pic.crop_top == 0.0 and pic.crop_bottom == 0.0)
-        check("check 6: cover crop applied, centered, no overflow",
-              approx and symmetric,
-              f"crop_left={pic.crop_left:.5f} expected≈{expected_side:.5f}")
+        # 6. contain fit: 1200x1040 image into a 2x2 square region scales
+        # down to fit entirely (w=2in, h≈1.733in), centered, nothing cropped.
+        check("check 6: contain fit — aspect preserved, fully visible, centered",
+              is_contain_fit(pic, 2, 2, 2, 2, 1200, 1040),
+              f"{pic.width}x{pic.height} EMU in 2x2in region, "
+              f"crops={pic.crop_left}/{pic.crop_right}/{pic.crop_top}/{pic.crop_bottom}")
 
     # 3. .png value via {{text:key}} is plain text, NOT an image
     out = render_template(make_single_shape_template("{{text:product_image}}"), data)
@@ -347,17 +371,17 @@ def repetition_checks():
     pics = count_pictures(out)
     check("R3: one image key on 2 slides -> 2 pictures", len(pics) == 2)
     if len(pics) == 2:
-        check("R3: each occurrence keeps its own region",
-              (pics[0].left, pics[0].width, pics[0].height) ==
-              (Inches(1), Inches(4), Inches(1))
-              and (pics[1].left, pics[1].width, pics[1].height) ==
-              (Inches(7), Inches(2), Inches(2)))
-        # 4:1 region crops top/bottom; 1:1 region crops sides
-        check("R9: cover crop computed per occurrence region",
-              pics[0].crop_top > 0 and pics[0].crop_left == 0
-              and pics[1].crop_left > 0 and pics[1].crop_top == 0,
-              f"wide crop_top={pics[0].crop_top:.4f}, "
-              f"square crop_left={pics[1].crop_left:.4f}")
+        # occurrence 1: 4x1 wide region -> height-limited contain fit;
+        # occurrence 2: 2x2 square region -> width-limited. Own fit per region.
+        check("R3: each occurrence keeps its own contain-fitted region",
+              is_contain_fit(pics[0], 1, 2, 4, 1, 1200, 1040)
+              and is_contain_fit(pics[1], 7, 3, 2, 2, 1200, 1040))
+        check("R9: contain fit computed per occurrence region, nothing cropped",
+              (pics[0].width, pics[0].height) != (pics[1].width, pics[1].height)
+              and pics[0].crop_left == pics[1].crop_left == 0.0
+              and pics[0].crop_top == pics[1].crop_top == 0.0,
+              f"wide {pics[0].width}x{pics[0].height} EMU, "
+              f"square {pics[1].width}x{pics[1].height} EMU")
 
     # R4 / binding identity (type, key): same key as text AND as image
     tpl = make_boxes_template([["{{text:product_image}}", "{{image:product_image}}"]])
@@ -385,6 +409,94 @@ def repetition_checks():
           len(i_ph) == 2 and i_ph[0].region != i_ph[1].region
           and [p.key for p in i_ph] == ["product_image"] * 2)
     check("R10: parser still reports no malformed tokens here", malformed == [])
+
+
+def table_checks():
+    """{{text:key}} placeholders inside table cells."""
+    from src.template_parser import parse_slides
+
+    title = "2026年销售报告"
+    data = {"title": title, "sales": "1258万元",
+            "product_image": "assets/product.png"}
+
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(
+        2, 2, Inches(1), Inches(1), Inches(6), Inches(1)
+    ).table
+    table.cell(0, 0).text = "标题"
+    table.cell(0, 1).text = f"Report: {{{{text:title}}}} 合计 {{{{text:sales}}}}"
+    table.cell(1, 0).text = "{{text:missing_key}}"
+    table.cell(1, 1).text = "{{image:product_image}}"
+    label_box = slide.shapes.add_textbox(Inches(1), Inches(4), Inches(4), Inches(0.5))
+    label_box.text_frame.paragraphs[0].add_run().text = "{{text:title}} (shape)"
+
+    # TB-0: the parser itself must expose cell placeholders
+    t_ph, i_ph, malformed = parse_slides(prs, data)
+    cell_keys = sorted(k for ph in t_ph for k in ph.keys)
+    check("TB-0: parser finds text keys in cells and shapes alike",
+          cell_keys == ["missing_key", "sales", "title", "title"]
+          and len(t_ph) == 3 and i_ph == [] and malformed == [],
+          str(cell_keys))
+
+    out = render_template(prs, data)
+    text = all_text(out)
+    check("TB-1: multiple text keys in one cell all rendered",
+          f"Report: {title} 合计 1258万元" in text)
+    check("TB-2: missing key leaves table cell unchanged",
+          "{{text:missing_key}}" in ANY_TOKEN.findall(text))
+    check("TB-3: {{image:key}} inside a cell stays unchanged, render does not fail",
+          "{{image:product_image}}" in text and len(count_pictures(out)) == 0)
+    check("TB-4: shape placeholders render alongside table cells",
+          f"{title} (shape)" in text)
+
+
+def zorder_checks():
+    """A replaced picture keeps the placeholder's original z-order slot."""
+    data = {"product_image": "assets/product.png"}
+
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    # Bottom-layer image placeholder, then two shapes stacked ON TOP of it.
+    ph = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(4), Inches(3)
+    )
+    ph.text_frame.paragraphs[0].add_run().text = "{{image:product_image}}"
+    top_box = slide.shapes.add_textbox(Inches(1.5), Inches(1.5), Inches(3), Inches(0.6))
+    top_box.text_frame.paragraphs[0].add_run().text = "TOP LABEL"
+    top_rect = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, Inches(2), Inches(2), Inches(1), Inches(1)
+    )
+    # A second, later placeholder also at the bottom of its own slot
+    ph2 = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, Inches(6), Inches(1), Inches(2), Inches(2)
+    )
+    ph2.text_frame.paragraphs[0].add_run().text = "{{image:product_image}}"
+    top_box2 = slide.shapes.add_textbox(Inches(6.2), Inches(1.2), Inches(2), Inches(0.5))
+    top_box2.text_frame.paragraphs[0].add_run().text = "LABEL 2"
+
+    out = render_template(prs, data)
+    shapes = list(out.slides[0].shapes)
+    types = [s.shape_type for s in shapes]
+    check("Z-0: both placeholders replaced",
+          types.count(MSO_SHAPE_TYPE.PICTURE) == 2, str(types))
+    pic1, label1 = types.index(MSO_SHAPE_TYPE.PICTURE), types.index(MSO_SHAPE_TYPE.TEXT_BOX)
+    check("Z-1: bottom-layer placeholder stays bottom-layer after replacement",
+          pic1 == 0 and label1 == 1, f"picture at {pic1}, label at {label1}")
+    check("Z-2: shapes added above the placeholder remain above the picture",
+          shapes[1].text_frame.text == "TOP LABEL"
+          and shapes[2].shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE)
+    # second occurrence: picture must sit directly before its own label
+    pic_i = [i for i, t in enumerate(types) if t == MSO_SHAPE_TYPE.PICTURE]
+    label2_i = next(i for i, s in enumerate(shapes)
+                    if s.has_text_frame and s.text_frame.text == "LABEL 2")
+    check("Z-3: per-occurrence z-order preserved for multiple images",
+          len(pic_i) == 2 and all(p < label2_i for p in pic_i[1:]),
+          f"pictures at {pic_i}, label2 at {label2_i}")
 
 
 def workspace_checks():
@@ -471,10 +583,8 @@ def workspace_checks():
         check("SEP-7: {{image:logo}} placeholder consumed, not textified",
               "{{image:logo}}" not in text and "logo.jpg" not in text)
         if pics:
-            check("SEP-7: image got its own region + crop (jpg into 4x2 region)",
-                  (pics[0].left, pics[0].top, pics[0].width, pics[0].height)
-                  == (Inches(1), Inches(4), Inches(4), Inches(2))
-                  and pics[0].crop_top > 0 and pics[0].crop_left == 0)
+            check("SEP-7: image got its own contain-fit in the 4x2 region",
+                  is_contain_fit(pics[0], 1, 4, 4, 2, 800, 600))
 
         # ---- §8: {{image:product}} resolves from each supported extension
         for ext in (".png", ".jpg", ".jpeg"):
@@ -570,8 +680,8 @@ def workspace_checks():
           MISSING_IMAGE_TOKEN in tokens)
     check("T10b: image key absent from workspace -> region unchanged",
           "{{image:product_image}}" in tokens
-          and find_picture(pics_all := count_pictures(prs), 10.9, 4.95, 1.6, 1.6) is None
-          and find_picture(pics_all, 7.1, 1.9, 5.3, 4.6) is None)
+          and find_picture_centered(pics_all := count_pictures(prs), 10.9, 4.95, 1.6, 1.6) is None
+          and find_picture_centered(pics_all, 7.1, 1.9, 5.3, 4.6) is None)
     check("T11: missing text key leaves {{text:customers}} unchanged",
           "{{text:customers}}" in tokens)
     check("No error: render completed with missing assets", True)
@@ -580,15 +690,16 @@ def workspace_checks():
     check("W: workspace image count == 3 (product x2 + logo x1)",
           len(pics) == 3, f"{len(pics)} picture(s)")
     if len(pics) == 3:
-        sq = find_picture(pics, 0.9, 1.9, 2.6, 2.6)
-        tall = find_picture(pics, 7.9, 1.9, 1.2, 3.4)
-        logo = find_picture(pics, 3.9, 1.9, 3.6, 1.2)
+        sq = find_picture_centered(pics, 0.9, 1.9, 2.6, 2.6)
+        tall = find_picture_centered(pics, 7.9, 1.9, 1.2, 3.4)
+        logo = find_picture_centered(pics, 3.9, 1.9, 3.6, 1.2)
         check("W: each occurrence got its own region",
               sq is not None and tall is not None and logo is not None)
-        check("T16: cover crop still per-occurrence in workspace mode",
+        check("T16: contain fit per occurrence in workspace mode",
               sq is not None and tall is not None and logo is not None
-              and sq.crop_left > 0 and tall.crop_left > sq.crop_left
-              and logo.crop_top > 0)
+              and is_contain_fit(sq, 0.9, 1.9, 2.6, 2.6, 1200, 1040)
+              and is_contain_fit(tall, 7.9, 1.9, 1.2, 3.4, 1200, 1040)
+              and is_contain_fit(logo, 3.9, 1.9, 3.6, 1.2, 800, 600))
 
 
 def main():
@@ -598,6 +709,10 @@ def main():
         semantic_checks()
         print("\n== Repeated-placeholder semantics ==")
         repetition_checks()
+        print("\n== Table-cell placeholder semantics ==")
+        table_checks()
+        print("\n== Z-order semantics ==")
+        zorder_checks()
         print("\n== UUID workspace semantics ==")
         workspace_checks()
     else:

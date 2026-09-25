@@ -17,10 +17,11 @@ A key may exist in both namespaces at once (e.g. content.json["logo"] and
 logo.jpg); neither lookup interferes with the other. Image files are never
 consulted for text and content.json values are never consulted for images.
 
-This module is a loading/composition adapter only. The core renderer files
-(renderer.py, template_parser.py, text_renderer.py, image_renderer.py) are
-used unchanged. The supported image extension list lives here (and in the
-template's explicit {{image:}} type), never in the renderer.
+This module is a loading/composition adapter only: it adds no workspace
+logic to the core renderer files (renderer.py, template_parser.py,
+text_renderer.py, image_renderer.py). The supported image extension list
+lives here (and in the template's explicit {{image:}} type), never in the
+renderer.
 """
 import json
 import shutil

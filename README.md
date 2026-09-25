@@ -27,8 +27,9 @@ PPTX 模板 + JSON 数据 + 图片
 - **文本占位符**：`{{text:key}}` 替换为 JSON 中对应值
 - **图片占位符**：`{{image:key}}` 对应的 Shape 作为图片区域
 - **文本样式保持**：字体、字号、加粗、颜色、对齐、文本框位置与尺寸均不被修改
-- **图片区域替换**：删除占位 Shape，在原位置、按原尺寸插入真实图片
-- **图片 Cover Crop**：保持图片纵横比、居中裁剪填满区域，绝不溢出占位区域
+- **图片区域替换**：删除占位 Shape，在区域居中插入完整图片，并保持占位 Shape 原有的图层顺序（底层占位替换后仍在底层）
+- **图片 Contain 缩放**：保持图片纵横比、等比缩放至完整落在区域内（不裁剪任何内容、不拉伸、不溢出）
+- **表格单元格占位符**：表格单元格内的 `{{text:key}}` 与 Shape 文本一样被识别和渲染（一格内可含多个 key）
 - **JSON 数据驱动**：唯一的约定就是 `占位符 key → data[key]`
 - **多页 PPT 模板**：模板包含多少页即可渲染多少页
 - **内联文本占位符**：如 `Total reported sales: {{text:sales}} year to date.`
@@ -118,9 +119,9 @@ ppt-template-renderer/
 | `data/example.json` | 直接数据模式的测试数据，仅纯 key-value，无类型信息 |
 | `assets/product.png`、`assets/logo.jpg` | Pillow 自动生成的测试图片 |
 | `workspace/<uuid4>/` | 测试用 UUID 工作目录（见第 12 节） |
-| `src/template_parser.py` | 扫描 Slide，识别 `{{text:}}` / `{{image:}}` 占位符，报告非法占位符 |
-| `src/text_renderer.py` | Run 级文本替换，保留原有样式 |
-| `src/image_renderer.py` | 图片区域替换 + Cover Crop 裁剪 |
+| `src/template_parser.py` | 扫描 Slide（含表格单元格），识别 `{{text:}}` / `{{image:}}` 占位符，报告非法占位符 |
+| `src/text_renderer.py` | Run 级文本替换（含表格单元格），保留原有样式 |
+| `src/image_renderer.py` | 图片区域替换 + Contain 等比缩放 + 图层顺序保持 |
 | `src/workspace_loader.py` | UUID 工作目录加载层：校验、读 content.json、按文件名 stem 发现图片；文本与图片两个命名空间严格分离，并提供 `render_workspace()` 组合入口 |
 | `src/renderer.py` | 通用渲染入口 `render(template_path, data, output_path)` |
 | `build_test_template.py` | 生成测试模板与测试图片（无需手工做 PPT） |
@@ -176,7 +177,7 @@ python main.py --template templates/sales_report_template.pptx --workspace works
 python verify.py
 ```
 
-自动执行四组检查：端到端工作流（直接模式）、占位符语义、重复占位符语义、UUID 工作目录语义。全部通过时输出 `ALL CHECKS PASSED`，否则以非零退出码失败。
+自动执行六组检查：端到端工作流（直接模式）、占位符语义、重复占位符语义、表格单元格语义、图层顺序语义、UUID 工作目录语义。全部通过时输出 `ALL CHECKS PASSED`，否则以非零退出码失败。
 
 ## 6. Renderer 接口
 
@@ -206,16 +207,18 @@ render
 
 ### 文本渲染
 
-Renderer 遍历每页 Slide 的 Shape 与段落，把段落的多个 Run 拼接成完整文本，用正则定位 `{{text:key}}`，然后**只改写 Run 的文本内容**——不重建任何 XML 样式节点。因此字体、字号、加粗、颜色、对齐和文本框几何信息全部保留。占位符被 PowerPoint 拆分到多个 Run 时，从占位符起始的 Run 开始写入替换值（该值继承起始 Run 的样式），其余被覆盖的 Run 清空对应片段。
+Renderer 遍历每页 Slide 的 Shape 与表格单元格，把段落的多个 Run 拼接成完整文本，用正则定位 `{{text:key}}`，然后**只改写 Run 的文本内容**——不重建任何 XML 样式节点。因此字体、字号、加粗、颜色、对齐和文本框几何信息全部保留。占位符被 PowerPoint 拆分到多个 Run 时，从占位符起始的 Run 开始写入替换值（该值继承起始 Run 的样式），其余被覆盖的 Run 清空对应片段。
 
 ### 图片渲染
 
 Renderer 将**整个文本内容恰好为** `{{image:key}}` 的 Shape 识别为图片区域：
 
-1. 记录该 Shape 的原始位置与尺寸（EMU）；
+1. 记录该 Shape 的原始位置与尺寸（EMU），以及它在 z-order（spTree）中的原始层级位置；
 2. 删除占位 Shape；
-3. 在同一区域插入真实图片（尺寸与区域完全一致）；
-4. 通过 OOXML 的 `srcRect` 裁剪属性实现 **Cover Crop**：当图片纵横比与区域不一致时，居中裁掉多余部分，保证图片铺满区域、保持纵横比且不溢出边界。
+3. 按 **Contain** 方式等比缩放图片：保持纵横比、缩放到能完整放进区域的最大尺寸，居中放置——**不裁剪任何图片内容**，纵横比不一致时图片只是不接触区域的短边；
+4. 把插入的图片放回占位 Shape 原来的层级位置：占位符在模板里处于最底层，替换后的图片仍然在最底层，其上方的 Shape 保持在上层。
+
+表格单元格内的 `{{image:key}}` 目前不能作为图片区域（单元格无法嵌入图片），会原样保留且不影响渲染。
 
 ## 8. 当前验证结果
 
@@ -227,11 +230,13 @@ python main.py ... --workspace ... --output output/workspace_mode.pptx  # OK
 python verify.py                       # ALL CHECKS PASSED
 ```
 
-`verify.py` 的四组检查**全部通过**（共 75 项）：
+`verify.py` 的六组检查**全部通过**（共 82 项）：
 
-- **端到端工作流（直接模式）**：模板与输出存在、PPTX 可解析、4 页齐全、所有期望值已渲染、除刻意缺失的 `{{image:missing_image}}` 外无残留占位符、5 个图片区域全部插入且各自裁剪独立、页面尺寸未变、zip 结构合法、png/jpg 均已嵌入。
-- **占位符语义**：`{{text:key}}` 渲染为文本；`{{image:key}}` 渲染为图片；`.png` 值经 `{{text:key}}` 仍按纯文本渲染；非法占位符被拒绝；Cover Crop 数值验证通过；单 Run、内联、跨 Run 的样式保持通过。
+- **端到端工作流（直接模式）**：模板与输出存在、PPTX 可解析、4 页齐全、所有期望值已渲染（含表格单元格内的内联占位符）、除刻意缺失的 `{{image:missing_image}}` 外无残留占位符、5 个图片区域全部插入且各自 Contain 适配独立、页面尺寸未变、zip 结构合法、png/jpg 均已嵌入。
+- **占位符语义**：`{{text:key}}` 渲染为文本；`{{image:key}}` 渲染为图片；`.png` 值经 `{{text:key}}` 仍按纯文本渲染；非法占位符被拒绝；Contain 适配数值验证通过（等比、居中、零裁剪）；单 Run、内联、跨 Run 的样式保持通过。
 - **重复占位符语义**：同 key 跨页、跨 Shape、同段落重复全部渲染；同一 key 的 text 与 image 绑定互不干扰；解析器按出现次数逐项暴露。
+- **表格单元格语义**：解析器同时暴露 Shape 与单元格中的 text key；一个单元格内多个 key 全部渲染；单元格中缺失 key 与 `{{image:key}}` 原样保留且渲染不失败。
+- **图层顺序语义**：最底层图片占位符替换后图片仍在最底层，其上的 Shape 保持在上层；同页多个占位符各自保持层级槽位。
 - **UUID 工作目录语义**：合法 UUID4 校验、非法名称拒绝（`test`/`123`/`abc`/UUIDv1）、content.json 加载、`.png/.jpg/.jpeg` 按 stem 解析（`.webp` 等不支持格式被忽略）、stem 冲突按优先级确定性解析、缺失资源占位符原样保留、路径限定在工作目录内、显式清理函数可用且拒绝非 UUID4 目录。
 
 ## 9. 当前限制
@@ -239,9 +244,10 @@ python verify.py                       # ALL CHECKS PASSED
 - 缺少数据 Key 时，目前占位符会保持原样，不会直接报错。
 - 图片占位符必须独占整个 Shape（Shape 内只能有这一个 `{{image:key}}` token）。
 - 跨 Run 的文本占位符采用起始 Run 的样式（不会按值重新排版样式）。
-- 当前主要处理 Slide Shape。
+- 当前处理 Slide Shape 与表格单元格（文本占位符）。
 - 不处理 Notes、Masters、Layouts 中的占位符。
 - Group 中的文本可以扫描，但 Group 暂不作为图片区域处理。
+- 表格单元格内的 `{{image:key}}` 暂不作为图片区域处理（原样保留）。
 - 相对图片路径仅按“JSON 目录 → 当前工作目录”顺序解析，不支持 URL。
 
 ## 10. 后续迁移方向

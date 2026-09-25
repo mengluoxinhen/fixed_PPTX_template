@@ -51,16 +51,18 @@ def _render_paragraph(paragraph, data):
 
 
 def render_text(prs, data):
-    """Replace all {{text:key}} placeholders in the presentation.
+    """Replace all {{text:key}} placeholders, shapes and table cells alike.
 
     Returns the list of keys that were actually replaced.
     """
-    from .template_parser import iter_text_shapes
+    from .template_parser import iter_cell_text_frames, iter_text_shapes
 
     replaced = []
     for slide in prs.slides:
-        for shape in iter_text_shapes(slide.shapes):
-            for paragraph in shape.text_frame.paragraphs:
+        frames = [shape.text_frame for shape in iter_text_shapes(slide.shapes)]
+        frames += list(iter_cell_text_frames(slide.shapes))
+        for frame in frames:
+            for paragraph in frame.paragraphs:
                 before = {
                     m.group(2)
                     for m in VALID_PATTERN.finditer(

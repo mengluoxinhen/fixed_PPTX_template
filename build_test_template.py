@@ -163,6 +163,18 @@ def build_metrics(slide):
         ("Total reported sales: {{text:sales}} year to date.", 14, False, GRAY),
     ])
 
+    # Data table: {{text:key}} placeholders inside table cells must be
+    # recognized and rendered by the parser/text renderer.
+    table_shape = slide.shapes.add_table(
+        2, 3, Inches(0.9), Inches(6.25), Inches(6.5), Inches(0.9)
+    )
+    table = table_shape.table
+    for j, header in enumerate(("Metric", "Value A", "Value B")):
+        table.cell(0, j).text = header
+    table.cell(1, 0).text = "Summary"
+    table.cell(1, 1).text = "{{text:sales}}"
+    table.cell(1, 2).text = "Growth {{text:growth}} YoY"
+
 
 def build_product(slide):
     slide.background.fill.solid()
