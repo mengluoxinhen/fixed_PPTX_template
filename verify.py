@@ -24,6 +24,14 @@ multiple keys per cell); missing keys and {{image:}} in cells stay unchanged.
 Part 5 — z-order: a replaced picture keeps the placeholder's original
 stacking position (bottom-layer placeholders stay bottom-layer).
 
+Part 5b — structurally split placeholders: token broken by a hard
+paragraph break, a soft <a:br> or an <a:fld>, in table cells and shapes;
+parser model == renderer model.
+
+Part 5c — merged table cells: real-world structure (gridSpan merged
+header with {{text:pro_code}}, multi-paragraph cells, legacy
+hMerge/vMerge="cont" fillers) rendered through the full pipeline.
+
 Part 6 — UUID workspace: validation, content.json loading, stem-based image
 resolution (.png/.jpg/.jpeg), missing-asset survival, path safety,
 explicit cleanup, and the workspace-mode output file.
@@ -499,6 +507,178 @@ def zorder_checks():
           f"pictures at {pic_i}, label2 at {label2_i}")
 
 
+def split_token_checks():
+    """Placeholders physically split by PowerPoint structures still render.
+
+    The parser sees text_frame.text (runs + \\v breaks + field text + \\n
+    paragraph joins); the renderer must use the SAME model. These cells
+    reproduce how real editors split a token: hard Enter, Shift+Enter,
+    and <a:fld> wrapping — previously recognized but silently never
+    replaced inside table cells.
+    """
+    from lxml import etree
+    from pptx.oxml.ns import qn
+
+    A_T, A_BR, A_FLD, A_P = qn("a:t"), qn("a:br"), qn("a:fld"), qn("a:p")
+
+    def runs_into(p_el, texts):
+        for t in texts:
+            r = etree.SubElement(p_el, qn("a:r"))
+            etree.SubElement(r, qn("a:rPr")).set("lang", "en-US")
+            etree.SubElement(r, A_T).text = t
+
+    data = {"title": "2026年销售报告", "sales": "1258万元", "logo": "示例科技"}
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(8), Inches(2)).table
+
+    def body(r, c):
+        tb = table.cell(r, c)._tc.find(qn("a:txBody"))
+        return tb, tb.find(A_P)
+
+    tb, p = body(0, 0)                       # cross-PARAGRAPH token
+    runs_into(p, ["报告 {{text:"])
+    runs_into(etree.SubElement(tb, A_P), ["title}} 终"])
+    tb, p = body(0, 1)                       # SOFT BREAK (<a:br>) inside token
+    runs_into(p, ["{{text:"])
+    etree.SubElement(p, A_BR)
+    runs_into(p, ["sales}} and {{text:lo"])
+    runs_into(p, ["go}}"])                   # + cross-run repeat in same cell
+    tb, p = body(1, 0)                       # token inside <a:fld>
+    runs_into(p, ["{{text"])
+    fld = etree.SubElement(p, A_FLD)
+    etree.SubElement(fld, qn("a:rPr"))
+    etree.SubElement(fld, A_T).text = ":title"
+    runs_into(p, ["}} done"])
+    runs_into(body(1, 1)[1], ["{{text:no_such_key}}"])  # unknown key survives
+
+    box = slide.shapes.add_textbox(Inches(1), Inches(4), Inches(6), Inches(1))
+    tb = box.text_frame._txBody
+    runs_into(tb.find(A_P), ["X {{text:"])
+    runs_into(etree.SubElement(tb, A_P), ["sales}} Y"])  # shape, cross-para
+
+    out = render_template(prs, data)
+    t = list(out.slides)[0].shapes[0].table
+    report = "\n".join(
+        t.cell(r, c).text_frame.text for r in range(2) for c in range(2)
+    )
+    box_text = list(list(out.slides)[0].shapes)[1].text_frame.text
+
+    check("SPL-1: token split by hard paragraph break renders (paragraphs merged)",
+          t.cell(0, 0).text_frame.text == f"报告 {data['title']} 终"
+          and len(t.cell(0, 0).text_frame.paragraphs) == 1,
+          repr(t.cell(0, 0).text_frame.text))
+    check("SPL-2: <a:br>-split token renders and the covered break is removed",
+          t.cell(0, 1).text_frame.text.startswith(data["sales"])
+          and "\v" not in report, repr(t.cell(0, 1).text_frame.text))
+    check("SPL-3: cross-run token in same cell renders after structural edit",
+          t.cell(0, 1).text_frame.text == f"{data['sales']} and {data['logo']}",
+          repr(t.cell(0, 1).text_frame.text))
+    check("SPL-4: token wrapped in <a:fld> renders as plain text",
+          t.cell(1, 0).text_frame.text == f"{data['title']} done",
+          repr(t.cell(1, 0).text_frame.text))
+    check("SPL-5: unknown key in split form still survives unchanged",
+          "{{text:no_such_key}}" in report)
+    check("SPL-6: shape text frame handles cross-paragraph token",
+          box_text == f"X {data['sales']} Y"
+          and len(out.slides[0].shapes[1].text_frame.paragraphs) == 1,
+          repr(box_text))
+
+
+def merged_cell_checks():
+    """Real-world merged-cell tables (gridSpan + legacy hMerge/vMerge).
+
+    Reproduces the user's dump: a 5-column header row whose origin cell
+    holds '{{text:pro_code}}项目配置说明' merged across the row, plus
+    multi-paragraph data cells like '有\\n全格栅AGS'. Goes through the
+    FULL pipeline (template saved to disk, render(), output reloaded).
+    """
+    from src.template_parser import parse_slides
+
+    data = {"pro_code": "XXHA-2026"}
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    # Table A: gridSpan merged header row (python-pptx merge()).
+    ta = slide.shapes.add_table(
+        3, 5, Inches(0.5), Inches(0.5), Inches(9), Inches(2)
+    ).table
+    ta.cell(0, 0).text = "{{text:pro_code}}项目配置说明"
+    ta.cell(0, 0).merge(ta.cell(0, 4))
+    for c, h in enumerate(["项目代号", "主动格栅", "空气悬架", "轮胎轮辋", "车底护板"]):
+        ta.cell(1, c).text = h
+    ta.cell(2, 0).text = "XXHA"
+    tf = ta.cell(2, 1).text_frame
+    tf.paragraphs[0].add_run().text = "有"
+    tf.add_paragraph().add_run().text = "全格栅AGS"
+    tf = ta.cell(2, 2).text_frame
+    tf.paragraphs[0].add_run().text = "标配"
+    tf.add_paragraph().add_run().text = "代号 {{text:pro_code}}"
+    ta.cell(2, 3).text = "235/60R18"
+    ta.cell(2, 4).text = "{{text:pro_code}}/尾部"
+
+    # Table B: legacy horizontal merge via hMerge origin/cont attributes.
+    tb = slide.shapes.add_table(
+        2, 2, Inches(0.5), Inches(3.2), Inches(4), Inches(1)
+    ).table
+    tb.cell(0, 0).text = "{{text:pro_code}}顶部"
+    tb.cell(0, 0)._tc.set("hMerge", "1")
+    tb.cell(0, 1)._tc.set("hMerge", "cont")
+    tb.cell(1, 0).text = "第二行A"
+    tb.cell(1, 1).text = "第二行B"
+
+    # Table C: legacy vertical merge via vMerge origin/cont attributes.
+    tc = slide.shapes.add_table(
+        2, 2, Inches(0.5), Inches(4.5), Inches(4), Inches(1)
+    ).table
+    tc.cell(0, 0).text = "{{text:pro_code}}竖合"
+    tc.cell(0, 0)._tc.set("vMerge", "1")
+    tc.cell(1, 0)._tc.set("vMerge", "cont")
+    tc.cell(0, 1).text = "右侧1"
+    tc.cell(1, 1).text = "右侧2"
+
+    _, _, malformed = parse_slides(prs, data)
+    check("MG-0: merged tables parse without malformed tokens", malformed == [],
+          str(malformed))
+
+    out = render_template(prs, data)
+    tables = [s.table for s in out.slides[0].shapes if getattr(s, "has_table", False)]
+    ta_out, tb_out, tc_out = tables
+
+    row0 = [ta_out.cell(0, c).text_frame.text for c in range(5)]
+    check("MG-1: gridSpan merged header origin renders the token",
+          row0[0] == "XXHA-2026项目配置说明", repr(row0[0]))
+    check("MG-2: covered gridSpan filler cells stay empty",
+          row0[1:] == ["", "", "", ""], repr(row0))
+    check("MG-3: no pro_code token survives anywhere in the output",
+          "{{text:pro_code}}" not in all_text(out))
+    check("MG-4: token rendered exactly once per source occurrence",
+          sum(cell.text_frame.text.count("XXHA-2026")
+              for t in tables for r in t.rows for cell in r.cells) == 5)
+    multi = ta_out.cell(2, 1).text_frame
+    check("MG-5: untouched multi-paragraph cell keeps both paragraphs",
+          multi.text == "有\n全格栅AGS" and len(multi.paragraphs) == 2,
+          repr(multi.text))
+    mixed = ta_out.cell(2, 2).text_frame
+    check("MG-6: token in a later paragraph renders, layout untouched",
+          mixed.text == "标配\n代号 XXHA-2026" and len(mixed.paragraphs) == 2,
+          repr(mixed.text))
+    check("MG-7: inline token in plain data cell renders",
+          ta_out.cell(2, 4).text_frame.text == "XXHA-2026/尾部")
+    check("MG-8: legacy hMerge origin renders, cont filler stays empty",
+          tb_out.cell(0, 0).text_frame.text == "XXHA-2026顶部"
+          and tb_out.cell(0, 1).text_frame.text == "",
+          repr([tb_out.cell(0, c).text_frame.text for c in range(2)]))
+    check("MG-9: legacy vMerge origin renders, cont filler stays empty",
+          tc_out.cell(0, 0).text_frame.text == "XXHA-2026竖合"
+          and tc_out.cell(1, 0).text_frame.text == "",
+          repr([tc_out.cell(r, 0).text_frame.text for r in range(2)]))
+
+
 def workspace_checks():
     import json
     import shutil
@@ -713,6 +893,10 @@ def main():
         table_checks()
         print("\n== Z-order semantics ==")
         zorder_checks()
+        print("\n== Structurally-split placeholder semantics ==")
+        split_token_checks()
+        print("\n== Merged-cell placeholder semantics (real case) ==")
+        merged_cell_checks()
         print("\n== UUID workspace semantics ==")
         workspace_checks()
     else:
