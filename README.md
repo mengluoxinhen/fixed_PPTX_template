@@ -127,6 +127,7 @@ ppt-template-renderer/
 | `build_test_template.py` | 生成测试模板与测试图片（无需手工做 PPT） |
 | `build_test_workspace.py` | 生成测试用 UUID 工作目录（含 content.json 与图片副本） |
 | `main.py` | 命令行入口，支持 `--data`（直接模式）与 `--workspace`（工作目录模式） |
+| `inspect_template.py` | 调试工具：只读导出渲染器从模板读取到的内容（见第 5 节） |
 | `verify.py` | 自动化验证（端到端工作流 + 占位符语义 + 重复占位符 + 工作目录） |
 
 ## 5. 使用方法
@@ -170,6 +171,27 @@ python main.py --template templates/sales_report_template.pptx --workspace works
 ```
 
 自动加载 `content.json` 并按文件名 stem 发现图片资源，再交给同一个渲染核心。详见第 12 节。
+
+### 调试：导出模板读取内容
+
+```bash
+# 对照直接模式数据
+python main.py --template templates/sales_report_template.pptx --data data/example.json --output output/direct_mode.pptx
+python inspect_template.py --template templates/sales_report_template.pptx --data data/example.json --out debug/dump_direct.json
+
+# 对照 UUID 工作目录
+python inspect_template.py --template templates/sales_report_template.pptx --workspace workspace/<uuid4> --out debug/dump_workspace.json
+
+# 仅查看模板本身（不带数据）
+python inspect_template.py --template templates/sales_report_template.pptx
+```
+
+`inspect_template.py` 是**只读**调试工具，不渲染、不修改模板。它把渲染器实际读取到的内容写成 JSON（默认 `debug/template_dump.json`，`debug/` 已被 git 忽略）：
+
+* 每个文本容器（Shape 与表格单元格）：名称/位置（EMU 与英寸）、原始全文、识别出的 `text_keys` / `image_keys` / 非法 token；
+* `parse_slides` 的解析视图：全部文本占位符、每个图片占位符的独立区域、非法 token 汇总；
+* 数据源概览：`content.json` 的 key 与值预览，或工作目录 `image_paths`（stem → 绝对路径）；
+* **绑定检查**（最常用）：`binding_check` 列出每个占位符是"将被渲染"还是"因缺 key 而原样保留"——渲染结果里某个 `{{...}}` 没被替换时，先看这里的 `missing_will_remain`。
 
 ### 运行验证
 
