@@ -1,9 +1,18 @@
 """Debug tool: dump everything the renderer reads from a PPTX template.
 
-    python inspect_template.py --template templates/sales_report_template.pptx --data data/example.json
-    python inspect_template.py --template templates/sales_report_template.pptx --workspace workspace/<uuid4>
+Run directly, with no command-line arguments:
 
-Writes a JSON file (default: debug/template_dump.json) containing:
+    python inspect_template.py
+
+All knobs are the constants below — edit them in code for each debugging
+session:
+
+    TEMPLATE   path to the .pptx template (required)
+    DATA       direct-mode JSON data file, or None
+    WORKSPACE  UUID4 workspace directory, or None (wins over DATA)
+    OUT        where the JSON dump is written
+
+The dump contains:
   - every text container (shape or table cell): geometry, full text,
     recognized {{text:key}} / {{image:key}} tokens, malformed tokens;
   - the parser's own view (parse_slides): text/image placeholders and
@@ -14,7 +23,6 @@ Writes a JSON file (default: debug/template_dump.json) containing:
 
 Read-only: this script never renders and never modifies the template.
 """
-import argparse
 import json
 import sys
 from pathlib import Path
@@ -23,6 +31,13 @@ from pptx import Presentation
 
 from src.template_parser import (extract_placeholders, find_malformed,
                                  iter_text_shapes, parse_slides)
+
+# ---- Debug knobs: edit these, then run `python inspect_template.py` ----
+TEMPLATE = "templates/sales_report_template.pptx"
+DATA = "data/example.json"   # None to skip direct-mode data
+WORKSPACE = None             # e.g. "workspace/550e8400-e29b-41d4-a716-446655440000"; beats DATA
+OUT = "debug/template_dump.json"
+# ------------------------------------------------------------------------
 
 EMU_PER_INCH = 914400
 KEY_CHARSET_NOTE = "keys must match [A-Za-z0-9_]+"
@@ -150,22 +165,14 @@ def preview_value(value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dump what the renderer reads from a template.")
-    parser.add_argument("--template", required=True)
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--data", help="direct-mode JSON data file")
-    group.add_argument("--workspace", help="UUID4 workspace directory")
-    parser.add_argument("--out", default="debug/template_dump.json")
-    args = parser.parse_args()
-
-    template_path = Path(args.template)
+    template_path = Path(TEMPLATE)
     if not template_path.is_file():
-        sys.exit(f"Template not found: {template_path}")
+        sys.exit(f"Template not found: {template_path} (edit TEMPLATE in this file)")
 
-    if args.workspace:
+    if WORKSPACE:
         from src.workspace_loader import load_workspace
 
-        workspace = load_workspace(args.workspace)
+        workspace = load_workspace(WORKSPACE)
         text_data = workspace["data"]
         image_available = workspace["image_paths"]
         data_source = {
@@ -175,13 +182,13 @@ def main():
             "content_json_values_preview": {k: preview_value(v) for k, v in text_data.items()},
             "image_paths": workspace["image_paths"],
         }
-    elif args.data:
-        with open(args.data, "r", encoding="utf-8") as f:
+    elif DATA:
+        with open(DATA, "r", encoding="utf-8") as f:
             text_data = json.load(f)
         image_available = text_data  # direct mode: image keys live in the same dict
         data_source = {
             "mode": "direct",
-            "data_file": str(args.data),
+            "data_file": str(DATA),
             "data_keys": sorted(text_data),
             "data_values_preview": {k: preview_value(v) for k, v in text_data.items()},
         }
@@ -189,7 +196,8 @@ def main():
         text_data = {}
         image_available = {}
         data_source = {"mode": "none",
-                       "note": "no --data/--workspace given; binding check marks everything missing"}
+                       "note": "DATA and WORKSPACE are both None; "
+                               "binding check marks everything missing"}
 
     prs = Presentation(str(template_path))
     dump = {
@@ -205,7 +213,7 @@ def main():
                                        data_source["mode"]),
     }
 
-    out_path = Path(args.out)
+    out_path = Path(OUT)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(dump, f, ensure_ascii=False, indent=2)

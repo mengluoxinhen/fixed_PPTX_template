@@ -174,19 +174,22 @@ python main.py --template templates/sales_report_template.pptx --workspace works
 
 ### 调试：导出模板读取内容
 
+`inspect_template.py` 不使用命令行参数，直接运行：
+
 ```bash
-# 对照直接模式数据
-python main.py --template templates/sales_report_template.pptx --data data/example.json --output output/direct_mode.pptx
-python inspect_template.py --template templates/sales_report_template.pptx --data data/example.json --out debug/dump_direct.json
-
-# 对照 UUID 工作目录
-python inspect_template.py --template templates/sales_report_template.pptx --workspace workspace/<uuid4> --out debug/dump_workspace.json
-
-# 仅查看模板本身（不带数据）
-python inspect_template.py --template templates/sales_report_template.pptx
+python inspect_template.py
 ```
 
-`inspect_template.py` 是**只读**调试工具，不渲染、不修改模板。它把渲染器实际读取到的内容写成 JSON（默认 `debug/template_dump.json`，`debug/` 已被 git 忽略）：
+要调整的变量全部集中在该文件顶部的常量中，**改代码即可切换调试目标**：
+
+```python
+TEMPLATE  = "templates/sales_report_template.pptx"  # 模板路径
+DATA      = "data/example.json"                     # 直接模式数据；None 表示不用
+WORKSPACE = None                                    # 或 "workspace/<uuid4>"，优先级高于 DATA
+OUT       = "debug/template_dump.json"              # 输出位置
+```
+
+`inspect_template.py` 是**只读**调试工具，不渲染、不修改模板。它把渲染器实际读取到的内容写成 JSON（`debug/` 已被 git 忽略）：
 
 * 每个文本容器（Shape 与表格单元格）：名称/位置（EMU 与英寸）、原始全文、识别出的 `text_keys` / `image_keys` / 非法 token；
 * `parse_slides` 的解析视图：全部文本占位符、每个图片占位符的独立区域、非法 token 汇总；
